@@ -1,9 +1,9 @@
 const STORAGE_KEY = "smart_light_aio_config";
 
 const defaults = {
-  username: "username",
-  feed: "feed",
-  key: "io_key"
+  username: "",
+  feed: "",
+  key: ""
 };
 
 function getConfig() {
