@@ -1,10 +1,16 @@
 const STORAGE_KEY = "smart_light_aio_config";
+const POLL_INTERVAL_MS = 10000;
 
 const defaults = {
   username: "",
   feed: "",
   key: ""
 };
+
+let currentState = false;
+let isSending = false;
+let requestSeq = 0;
+let pollTimer = null;
 
 function getConfig() {
   try {
@@ -15,13 +21,19 @@ function getConfig() {
 }
 
 function saveSettings() {
-  const cfg = {
-    username: document.getElementById("aioUser").value.trim(),
-    feed: document.getElementById("aioFeed").value.trim(),
-    key: document.getElementById("aioKey").value.trim()
-  };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  const username = document.getElementById("aioUser").value.trim();
+  const feed = document.getElementById("aioFeed").value.trim().toLowerCase();
+  const key = document.getElementById("aioKey").value.trim();
+
+  if (!username || !feed || !key) {
+    alert("Please fill in Username, Feed Key, and Active Key.");
+    return;
+  }
+
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ username, feed, key }));
+  document.getElementById("aioFeed").value = feed;
   alert("Settings saved!");
+  switchTab("main");
   fetchLatestState();
 }
 
@@ -52,52 +64,96 @@ function setBadge(text, ok) {
 }
 
 async function fetchLatestState() {
+  if (isSending || document.hidden) return;
+
   const cfg = getConfig();
   if (!cfg.username || !cfg.feed || !cfg.key) {
     setBadge("Add AIO Key", false);
     return;
   }
 
+  const seq = ++requestSeq;
   const url = `https://io.adafruit.com/api/v2/${encodeURIComponent(cfg.username)}/feeds/${encodeURIComponent(cfg.feed)}/data/last`;
+
   try {
     const res = await fetch(url, {
+      cache: "no-store",
       headers: { "X-AIO-Key": cfg.key }
     });
+
+    // Drop stale response if a newer write/poll happened while in flight
+    if (seq !== requestSeq || isSending) return;
+
+    if (res.status === 401 || res.status === 403) {
+      setBadge("Invalid Key", false);
+      return;
+    }
+    if (res.status === 429) {
+      setBadge("Rate Limited", false);
+      return;
+    }
+    if (res.status === 404) {
+      setBadge("No Data Yet", true);
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
     const data = await res.json();
     const val = String(data.value || "").trim().toUpperCase();
-    renderState(val === "ON" || val === "1", "Adafruit IO");
+    currentState = val === "ON" || val === "1";
+    renderState(currentState, "Adafruit IO");
     setBadge("Online", true);
-  } catch (err) {
-    setBadge("Sync Error", false);
+  } catch {
+    if (seq === requestSeq) {
+      setBadge("Sync Error", false);
+    }
   }
 }
 
 async function setLight(turnOn) {
+  if (isSending) return;
+
   const cfg = getConfig();
   if (!cfg.username || !cfg.feed || !cfg.key) {
     alert("Please enter your Adafruit IO credentials in Settings first.");
+    renderState(currentState);
     switchTab("settings");
     return;
   }
 
+  const prevState = currentState;
+  isSending = true;
+  requestSeq++; // Invalidate any in-flight poll
+  document.getElementById("manualToggle").disabled = true;
   renderState(turnOn, "Sending...");
+
   const url = `https://io.adafruit.com/api/v2/${encodeURIComponent(cfg.username)}/feeds/${encodeURIComponent(cfg.feed)}/data`;
   try {
     const res = await fetch(url, {
       method: "POST",
+      cache: "no-store",
       headers: {
         "Content-Type": "application/json",
         "X-AIO-Key": cfg.key
       },
       body: JSON.stringify({ value: turnOn ? "ON" : "OFF" })
     });
+
+    if (res.status === 401 || res.status === 403) throw new Error("Invalid Adafruit IO key");
+    if (res.status === 429) throw new Error("Rate limit exceeded");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    renderState(turnOn, "Synced");
+
+    currentState = Boolean(turnOn);
+    renderState(currentState, "Synced");
     setBadge("Online", true);
   } catch (err) {
+    currentState = prevState;
+    renderState(prevState, "Reverted");
     setBadge("Send Failed", false);
-    alert("Failed to send command to Adafruit IO.");
+    alert(`Failed to send command: ${err.message}`);
+  } finally {
+    isSending = false;
+    document.getElementById("manualToggle").disabled = false;
   }
 }
 
@@ -105,6 +161,17 @@ function onToggleChanged() {
   const checked = document.getElementById("manualToggle").checked;
   setLight(checked);
 }
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(fetchLatestState, POLL_INTERVAL_MS);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    fetchLatestState();
+  }
+});
 
 window.addEventListener("DOMContentLoaded", () => {
   const cfg = getConfig();
@@ -117,5 +184,5 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   fetchLatestState();
-  setInterval(fetchLatestState, 5000);
+  startPolling();
 });
