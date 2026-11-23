@@ -1,4 +1,4 @@
-const CACHE_NAME = "smart-light-pwa-v1";
+const CACHE_NAME = "smart-light-pwa-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -23,11 +23,17 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  // Never cache Adafruit IO API requests
-  if (event.request.url.includes("io.adafruit.com")) {
+  if (event.request.method !== "GET" || event.request.url.includes("io.adafruit.com")) {
     return;
   }
+
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((response) => {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
